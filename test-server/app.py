@@ -21,7 +21,8 @@ def google_auth():
 @app.route("/api/v1/user", methods=["GET"])
 def get_user():
     return jsonify({"id": 1, "name": "Test User", "email": "test@example.com"})
-
+ 
+ 
 
 @app.route("/api/v1/data", methods=["GET"])
 def get_data():

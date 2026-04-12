@@ -1,0 +1,99 @@
+# ============================================================================
+# ML SERVICE .gitignore
+# ============================================================================
+# Python Flask ML prediction service with trained models
+
+# ─── Environment & Configuration ────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ─── Virtual Environments ──────────────────────────────────────────────────
+venv/
+venv_new/
+ENV/
+env/
+.venv
+
+# ─── IDE & Editors ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+
+# ─── Logs & Debugging ──────────────────────────────────────────────────────
+*.log
+logs/
+*.pot
+
+# ─── ML Artifacts (Large Files) ────────────────────────────────────────────
+# Note: These should be stored in Git LFS or committed separately
+# Uncomment if using Git LFS:
+# artifacts/*.pkl
+# artifacts/*.pt
+# artifacts/*.npz
+
+# Alternatively, exclude all in artifacts except metadata:
+artifacts/
+!artifacts/training_metadata.json
+!artifacts/.gitkeep
+
+# ─── Testing & Coverage ───────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# ─── Jupyter Notebooks ─────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ─── OS Files ──────────────────────────────────────────────────────────────
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.TemporaryItems
+__MACOSX/
+Thumbs.db
+ehthumbs.db
+
+# ─── Flask ────────────────────────────────────────────────────────────────
+instance/
+.webassets-cache
+
+# ─── Temporary Files ──────────────────────────────────────────────────────
+*.tmp
+*.temp
+*.bak

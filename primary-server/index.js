@@ -15,84 +15,71 @@ const PORT = 3000;
 const attackLog = [];
 
 // ─── ROUTE: POST /api/v1/ingest ───────────────────────────────────────────────
-// Agent calls this with a fully-computed CICIDS feature vector.
 // This route:
 //   1. Forwards the features to the ML service
 //   2. Stores the prediction result
 //   3. Returns the prediction to the agent (just for its console log)
 app.post("/api/v1/ingest", async (req, res) => {
-  const f = req.body;
+  const payload = req.body;
 
-  if (!f || typeof f !== "object") {
+  if (!payload || typeof payload !== "object") {
     return res.status(400).json({ error: "Invalid payload" });
   }
 
+  console.log(
+    "[Backend] Received flow from agent:",
+    JSON.stringify(payload).slice(0, 120),
+  );
+
+  let result = null;
+
   try {
-    // ✅ Normalize (important for ML consistency)
-    const payload = {
-      duration: f.duration || 0,
-      total_packets: f.total_packets || 0,
-      forward_packets: f.forward_packets || 0,
-      reverse_packets: f.reverse_packets || 0,
-      total_bytes: f.total_bytes || 0,
-      forward_bytes: f.forward_bytes || 0,
-      reverse_bytes: f.reverse_bytes || 0,
-
-      min_packet_size: f.min_packet_size || 0,
-      max_packet_size: f.max_packet_size || 0,
-      avg_packet_size: f.avg_packet_size || 0,
-      forward_avg_packet_size: f.forward_avg_packet_size || 0,
-      reverse_avg_packet_size: f.reverse_avg_packet_size || 0,
-
-      packets_per_second: f.packets_per_second || 0,
-      bytes_per_second: f.bytes_per_second || 0,
-      forward_packets_per_second: f.forward_packets_per_second || 0,
-      reverse_packets_per_second: f.reverse_packets_per_second || 0,
-
-      tcp_flags_count: f.tcp_flags_count || 0,
-      syn_count: f.syn_count || 0,
-      fin_count: f.fin_count || 0,
-      rst_count: f.rst_count || 0,
-      ack_count: f.ack_count || 0,
-
-      src_port: f.src_port || 0,
-      dst_port: f.dst_port || 0,
-      protocol: f.protocol || 0,
-
-      forward_ttl: f.forward_ttl || 0,
-      reverse_ttl: f.reverse_ttl || 0,
-
-      tcp_window_size_forward: f.tcp_window_size_forward || 0,
-      tcp_window_size_reverse: f.tcp_window_size_reverse || 0,
-
-      is_bidirectional: f.is_bidirectional || 0,
-      connection_state: f.connection_state || "INT",
-    };
-
-    console.log("\n[Backend] Flow received:");
-    console.log(payload);
-
-    // 🔥 Forward to ML service
-    // const mlRes = await fetch("http://localhost:3002/predict", {
-    //   method: "POST",
-    //   headers: {
-    //     "Content-Type": "application/json",
-    //   },
-    //   body: JSON.stringify(payload),
-    // });
-
-    // const result = await mlRes.json();
-
-    // console.log("[ML Response]:", result);
-
-    return res.json({
-      ok: true,
-      // prediction: result,
+    const mlRes = await fetch(ML_SERVICE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
+
+    if (!mlRes.ok) {
+      const errText = await mlRes.text();
+      console.error(`[ML] HTTP ${mlRes.status}:`, errText.slice(0, 200));
+      // Still store the flow, just without a prediction
+    } else {
+      result = await mlRes.json();
+      console.log("[ML Response]:", result);
+    }
   } catch (err) {
-    console.error("[Backend Error]", err.message);
-    return res.status(500).json({ error: "ML forwarding failed" });
+    console.error("[ML Error]:", err.message);
   }
+
+  // ── Store the record regardless of ML outcome ──────────────────────────────
+  const record = {
+    timestamp: new Date().toISOString(),
+    source_ip: payload.srcip ?? "unknown",
+    prediction: result?.prediction === 1 ? "ATTACK" : "NORMAL",
+    attack_probability: result?.attack_probability ?? null,
+    ml_available: result !== null,
+    features: {
+      dur: payload.dur,
+      spkts: payload.spkts,
+      dpkts: payload.dpkts,
+      sbytes: payload.sbytes,
+      dbytes: payload.dbytes,
+      rate: payload.rate,
+      proto: payload.proto,
+    },
+  };
+
+  attackLog.push(record);
+
+  // Keep memory bounded (last 10 000 flows)
+  if (attackLog.length > 10_000) attackLog.shift();
+
+  return res.json({
+    stored: true,
+    prediction: record.prediction,
+    attack_probability: record.attack_probability,
+  });
 });
 
 // ─── ROUTE: GET /api/v1/attacks ───────────────────────────────────────────────

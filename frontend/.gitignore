@@ -1,0 +1,96 @@
+# ============================================================================
+# FRONTEND DASHBOARD .gitignore
+# ============================================================================
+# Streamlit Python dashboard web application
+
+# ─── Environment & Configuration ────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ─── Virtual Environments ──────────────────────────────────────────────────
+venv/
+venv_new/
+ENV/
+env/
+.venv
+
+# ─── Streamlit ───────────────────────────────────────────────────────────────
+.streamlit/
+!.streamlit/config.toml.example
+.streamlit/secrets.toml
+.streamlit/*.toml
+
+# ─── IDE & Editors ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+
+# ─── Logs & Debugging ──────────────────────────────────────────────────────
+*.log
+logs/
+*.pot
+
+# ─── Testing & Coverage ───────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# ─── Jupyter Notebooks ─────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+.jupyter/
+
+# ─── OS Files ──────────────────────────────────────────────────────────────
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.TemporaryItems
+__MACOSX/
+Thumbs.db
+ehthumbs.db
+
+# ─── Cache Files ──────────────────────────────────────────────────────────
+*.cache
+.cache/
+__pycache__/
+
+# ─── Temporary Files ──────────────────────────────────────────────────────
+*.tmp
+*.temp
+*.bak
+*.orig

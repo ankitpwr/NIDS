@@ -1,0 +1,83 @@
+# ============================================================================
+# ROOT .gitignore
+# ============================================================================
+# NIDS1 - Network Intrusion Detection System
+# Repository root-level ignores for common development artifacts
+
+# ─── Environment Files ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.env
+
+# ─── OS Files ──────────────────────────────────────────────────────────────
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.TemporaryItems
+__MACOSX/
+Thumbs.db
+ehthumbs.db
+
+# ─── IDE & Editors ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+
+# ─── Logs ──────────────────────────────────────────────────────────────────
+*.log
+logs/
+*.pot
+
+# ─── Dependencies ──────────────────────────────────────────────────────────
+node_modules/
+venv/
+venv_new/
+ENV/
+env/
+.venv
+
+# ─── Build Outputs (if any) ────────────────────────────────────────────────
+build/
+dist/
+out/
+
+# ─── Testing & Coverage ───────────────────────────────────────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# ─── Temporary Files ──────────────────────────────────────────────────────
+*.tmp
+*.temp
+*.bak
+*.orig
+*.swp
+*~
+.#*
+
+# ─── Database Files ───────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── Large ML Artifacts (use Git LFS for these) ────────────────────────────
+# models/
+# artifacts/
+# data/
+
+# ─── Cache ─────────────────────────────────────────────────────────────────
+.cache/
+__pycache__/
+.pytest_cache/
