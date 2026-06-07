@@ -1,61 +1,46 @@
 import express from "express";
+import Redis from "ioredis";
+import cors from "cors";
 
 const app = express();
 app.use(express.json());
+const options = {
+  origin: ["http://localhost:5173", "https://orbitfrontend.sketch.qzz.io"],
+};
+app.use(cors(options));
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-const ML_SERVICE_URL = "http://localhost:3002/predict"; // model service
+const ML_SERVICE_URL = "http://localhost:3002/predict";
 const PORT = 3000;
 
-// ─── IN-MEMORY STORE ─────────────────────────────────────────────────────────
-// Replace with Prisma + PostgreSQL when ready.
-// Shape of each record stays the same — just swap:
-//   attackLog.push(record)   →  await prisma.attack.create({ data: record })
-//   [...attackLog].reverse() →  await prisma.attack.findMany({ orderBy: { timestamp: "desc" } })
-const attackLog = [];
+// Initialize Redis client (defaults to localhost:6379)
+const redis = new Redis();
+
+redis.on("connect", () => console.log("[Redis] Connected successfully"));
+redis.on("error", (err) => console.error("[Redis] Error:", err));
 
 // ─── ROUTE: POST /api/v1/ingest ───────────────────────────────────────────────
-// This route:
-//   1. Forwards the features to the ML service
-//   2. Stores the prediction result
-//   3. Returns the prediction to the agent (just for its console log)
 app.post("/api/v1/ingest", async (req, res) => {
   const payload = req.body;
-
-  if (!payload || typeof payload !== "object") {
+  if (!payload || typeof payload !== "object")
     return res.status(400).json({ error: "Invalid payload" });
-  }
-
-  console.log(
-    "[Backend] Received flow from agent:",
-    JSON.stringify(payload).slice(0, 120),
-  );
 
   let result = null;
-
   try {
     const mlRes = await fetch(ML_SERVICE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
-    if (!mlRes.ok) {
-      const errText = await mlRes.text();
-      console.error(`[ML] HTTP ${mlRes.status}:`, errText.slice(0, 200));
-      // Still store the flow, just without a prediction
-    } else {
-      result = await mlRes.json();
-      console.log("[ML Response]:", result);
-    }
+    if (mlRes.ok) result = await mlRes.json();
   } catch (err) {
     console.error("[ML Error]:", err.message);
   }
 
-  // ── Store the record regardless of ML outcome ──────────────────────────────
   const record = {
     timestamp: new Date().toISOString(),
-    source_ip: payload.srcip ?? "unknown",
+
+    source_ip: payload.real_ip ?? payload.srcip ?? "unknown",
     prediction: result?.prediction === 1 ? "ATTACK" : "NORMAL",
     attack_probability: result?.attack_probability ?? null,
     ml_available: result !== null,
@@ -70,10 +55,14 @@ app.post("/api/v1/ingest", async (req, res) => {
     },
   };
 
-  attackLog.push(record);
+  await redis.lpush("nids:logs", JSON.stringify(record));
 
-  // Keep memory bounded (last 10 000 flows)
-  if (attackLog.length > 10_000) attackLog.shift();
+  await redis.ltrim("nids:logs", 0, 99);
+
+  await redis.incr("nids:stats:total_flows");
+  if (record.prediction === "ATTACK") {
+    await redis.incr("nids:stats:attacks");
+  }
 
   return res.json({
     stored: true,
@@ -82,53 +71,31 @@ app.post("/api/v1/ingest", async (req, res) => {
   });
 });
 
-// ─── ROUTE: GET /api/v1/attacks ───────────────────────────────────────────────
-// Frontend calls this to populate the alert table and traffic chart.
-// Returns last 100 records, newest first.
-app.get("/api/v1/attacks", (req, res) => {
-  const recent = [...attackLog].reverse().slice(0, 100);
-  return res.json(recent);
+app.get("/api/v1/attacks", async (req, res) => {
+  const logs = await redis.lrange("nids:logs", 0, -1);
+  const parsedLogs = logs.map((log) => JSON.parse(log));
+  return res.json(parsedLogs);
 });
 
-// ─── ROUTE: GET /api/v1/stats ─────────────────────────────────────────────────
-// Frontend calls this for the summary panel (total flows, attack count, rate).
-app.get("/api/v1/stats", (req, res) => {
-  const total = attackLog.length;
-  const attacks = attackLog.filter((r) => r.prediction === "ATTACK").length;
+app.get("/api/v1/stats", async (req, res) => {
+  const [totalStr, attacksStr] = await redis.mget(
+    "nids:stats:total_flows",
+    "nids:stats:attacks",
+  );
+
+  const total = parseInt(totalStr || "0", 10);
+  const attacks = parseInt(attacksStr || "0", 10);
+  const normal = total - attacks;
+  const attackRate = total > 0 ? ((attacks / total) * 100).toFixed(1) : "0.0";
 
   return res.json({
     total_flows: total,
     attacks_detected: attacks,
-    normal_flows: total - attacks,
-    attack_rate_pct: total > 0 ? ((attacks / total) * 100).toFixed(1) : "0.0",
+    normal_flows: normal,
+    attack_rate_pct: attackRate,
   });
 });
 
-// ─── ROUTE: GET /api/v1/health ────────────────────────────────────────────────
-app.get("/api/v1/health", async (req, res) => {
-  let mlStatus = "unreachable";
-  try {
-    const r = await fetch("http://localhost:3002/health");
-    const ml = await r.json();
-    mlStatus = ml.status || "ok";
-  } catch {
-    mlStatus = "unreachable";
-  }
-
-  return res.json({
-    backend: "ok",
-    ml_service: mlStatus,
-    log_size: attackLog.length,
-  });
-});
-
-// ─── START ───────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`[Backend] Running on http://localhost:${PORT}`);
-  console.log(
-    `[Backend] Forwarding predictions to ML service at ${ML_SERVICE_URL}`,
-  );
-  console.log(
-    `[Backend] Frontend API → GET /api/v1/attacks | GET /api/v1/stats`,
-  );
-});
+app.listen(PORT, () =>
+  console.log(`[Backend] Running on http://localhost:${PORT}`),
+);
