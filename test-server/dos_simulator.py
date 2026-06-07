@@ -43,10 +43,10 @@ import threading, time, random, socket
 
 TARGET_HOST = "127.0.0.1"
 TARGET_PORT = 8080
-DURATION    = 10      # seconds
+DURATION    = 1     # seconds
 
-# 30 threads — enough to push ct_srv_dst to cap (15) within 1s,
-# but not so many that they saturate the agent queue.
+
+
 THREADS = 30
 
 # Very short timeout causes the OS to RST the connection immediately after SYN.

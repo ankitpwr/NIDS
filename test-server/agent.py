@@ -6,14 +6,14 @@ from queue import Queue, Empty
 from collections import defaultdict
 from scapy.all import sniff, IP, TCP, UDP, Raw, get_if_list, get_if_addr
 
+# ── NEW: lightweight HTTP server to receive real-IP hints from the test server
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json as _json
+
 # ─────────────────────────────────────────────────────────────────────────────
 # INTERFACE DISCOVERY
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-
-
-# Loops through all interfaces
 def find_lan_interface() -> str | None:
     """Return the first interface with a private LAN IP, or None."""
     for iface in get_if_list():
@@ -25,8 +25,8 @@ def find_lan_interface() -> str | None:
             continue
     return None
 
-LAN_IFACE = find_lan_interface()
-LOOPBACK_IFACE = r"\Device\NPF_Loopback" #  localhost → localhost (Local traffic does NOT go through WiFi it goes through loopback driver)
+LAN_IFACE      = find_lan_interface()
+LOOPBACK_IFACE = r"\Device\NPF_Loopback"  # localhost traffic on Windows
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
@@ -37,6 +37,11 @@ MAX_FLOW_PKTS = 50
 WINDOW_SIZE   = 20
 BACKEND_URL   = "http://localhost:3000/api/v1/ingest"
 RECENT_WINDOW = 1
+
+# Port this agent listens on for real-IP hints from the test server
+HINT_PORT     = 9000
+# How long (seconds) a cached real-IP hint is considered valid
+HINT_TTL      = 5.0
 
 CT_CAPS = {
     "ct_state_ttl":     10,
@@ -50,6 +55,86 @@ CT_CAPS = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# REAL-IP HINT CACHE
+# ─────────────────────────────────────────────────────────────────────────────
+# The test server posts {real_ip, timestamp, path, method} here whenever it
+# handles a request that came through Cloudflare Tunnel.  We keep a short
+# list of recent hints; when we flush a loopback flow (src == 127.0.0.1) we
+# substitute the most-recently-seen real IP.
+#
+# Why this works:
+#   - Each HTTP request through the tunnel causes exactly ONE hint + ONE flow.
+#   - The hint arrives at roughly the same time as the packets, so the most
+#     recent un-consumed hint belongs to the current flow.
+#   - HINT_TTL evicts stale hints so we never wrongly tag unrelated traffic.
+
+_hint_lock  = threading.Lock()
+_hint_cache: list[dict] = []   # [{real_ip, timestamp, path, method}, ...]
+
+
+def store_hint(hint: dict):
+    """Called from the hint HTTP server thread."""
+    with _hint_lock:
+        _hint_cache.append(hint)
+        # Evict hints older than HINT_TTL
+        cutoff = time.time() - HINT_TTL
+        _hint_cache[:] = [h for h in _hint_cache if h["timestamp"] >= cutoff]
+
+
+def pop_latest_hint() -> str | None:
+    """
+    Return and remove the most recent cached real IP, or None if the cache is
+    empty / all hints are expired.
+    Called from the flow-processor thread when flushing a 127.0.0.1 flow.
+    """
+    with _hint_lock:
+        cutoff = time.time() - HINT_TTL
+        valid  = [h for h in _hint_cache if h["timestamp"] >= cutoff]
+        if not valid:
+            _hint_cache.clear()
+            return None
+        # Take the newest hint
+        valid.sort(key=lambda h: h["timestamp"], reverse=True)
+        best = valid[0]
+        _hint_cache.remove(best)
+        return best["real_ip"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HINT HTTP SERVER  (runs in its own daemon thread)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _HintHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path != "/ip-hint":
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body   = self.rfile.read(length)
+            hint   = _json.loads(body)
+            hint.setdefault("timestamp", time.time())
+            store_hint(hint)
+            print(f"[Hint] Received real_ip={hint.get('real_ip')} path={hint.get('path')}")
+        except Exception as e:
+            print(f"[Hint] Parse error: {e}")
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    # Silence the default access log noise
+    def log_message(self, *_):
+        pass
+
+
+def run_hint_server():
+    server = HTTPServer(("127.0.0.1", HINT_PORT), _HintHandler)
+    print(f"[Agent] Hint server listening on 127.0.0.1:{HINT_PORT}/ip-hint")
+    server.serve_forever()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SHARED STATE
 # ─────────────────────────────────────────────────────────────────────────────
 recent_dst_flows = defaultdict(list)
@@ -60,10 +145,9 @@ packet_queue = Queue(maxsize=10_000)
 active_flows: dict = {}
 running = True
 
-
 _seen_lock    = threading.Lock()
 _seen_packets = {}   # {dedup_key: expiry_time}
-_DEDUP_TTL    = 0.5  # seconds — drop duplicate within 500ms
+_DEDUP_TTL    = 0.5  # seconds
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,11 +155,6 @@ _DEDUP_TTL    = 0.5  # seconds — drop duplicate within 500ms
 # ─────────────────────────────────────────────────────────────────────────────
 
 def selftest_interface(iface: str, label: str) -> bool:
-    """
-    Try to sniff 1 packet on `iface` for up to 3 seconds.
-    Returns True if the interface is usable (even if 0 packets arrive —
-    absence of packets ≠ broken; a PermissionError means broken).
-    """
     ok = True
     try:
         sniff(iface=iface, count=1, timeout=3, store=False)
@@ -98,7 +177,7 @@ def run_selftests() -> bool:
     else:
         print("  [!] No LAN interface found — only loopback will be sniffed")
     print("[Agent] ────────────────────────────────────────────────────\n")
-    return lo_ok  # loopback working is the minimum requirement
+    return lo_ok
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,8 +208,7 @@ def _snap_ttl(raw: int, known: list) -> int:
 # PACKET HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-#Extract TCP/UDP ports
-def get_ports(pkt): 
+def get_ports(pkt):
     if pkt.haslayer(TCP): return pkt[TCP].sport, pkt[TCP].dport
     if pkt.haslayer(UDP): return pkt[UDP].sport, pkt[UDP].dport
     return None, None
@@ -228,20 +306,18 @@ def is_duplicate(pkt) -> bool:
         sp, dp = get_ports(pkt)
         # Round timestamp to 10ms bucket — same packet on two interfaces
         # will have nearly identical timestamps
-        t_bucket = round(float(pkt.time) * 100)
+        t_bucket  = round(float(pkt.time) * 100)
         dedup_key = (ip.src, ip.dst, sp, dp, t_bucket)
     except Exception:
         return False
 
     now = time.time()
     with _seen_lock:
-        # Evict expired entries
         expired = [k for k, exp in _seen_packets.items() if now > exp]
         for k in expired:
             del _seen_packets[k]
-
         if dedup_key in _seen_packets:
-            return True   # duplicate — already queued from the other interface
+            return True
         _seen_packets[dedup_key] = now + _DEDUP_TTL
         return False
 
@@ -265,12 +341,11 @@ def capture_on(iface: str, label: str):
             packet_queue.put(pkt)
 
     try:
-        # Listen to network interface, capture the packets for tcp port 8080 and for each packet call handler()
         sniff(
             iface=iface,
             prn=handler,
             store=False,
-            filter=f"tcp port {TARGET_PORT}",  
+            filter=f"tcp port {TARGET_PORT}",
         )
     except PermissionError:
         print(f"[Agent] [{label}] PERMISSION DENIED — must run as Administrator")
@@ -285,17 +360,17 @@ def capture_on(iface: str, label: str):
 def process_packets():
     print("[Agent] Flow processor started")
     window, last_time = [], time.time()
-    while running: 
+    while running:
         try:
-            pkt = packet_queue.get(timeout=0.2) # Takes packet from queue and wait for 0.2 seconds
-            window.append(pkt) # Add packet to window
+            pkt = packet_queue.get(timeout=0.2)
+            window.append(pkt)
         except Empty:
             pass
-        if window and (len(window) >= WINDOW_SIZE or time.time() - last_time > 0.5): #Process window when 20 packet or 0.5 passed
-            process_window(window) #Send window for flow building
+        if window and (len(window) >= WINDOW_SIZE or time.time() - last_time > 0.5):
+            process_window(window)
             window, last_time = [], time.time()
 
-# creating flow form packet window.
+
 def process_window(packets):
     now = time.time()
     for pkt in packets:
@@ -324,6 +399,18 @@ def extract_features(key, flow) -> dict:
     src_ip, dst_ip, src_port, dst_port, ip_proto = key
     now = time.time()
 
+    # ── Real-IP substitution ──────────────────────────────────────────────────
+    # When traffic arrives through Cloudflare Tunnel, every packet comes from
+    # 127.0.0.1 at the TCP level.  The test server pushes the real client IP
+    # (from CF-Connecting-IP) to our hint cache; we swap it in here so that
+    # the ML model and dashboard see the actual attacker/client IP.
+    reported_src_ip = src_ip
+    if src_ip == "127.0.0.1":
+        hint_ip = pop_latest_hint()
+        if hint_ip:
+            reported_src_ip = hint_ip
+            print(f"[Agent] Loopback flow — substituting srcip {src_ip} → {reported_src_ip}")
+
     fwd, rev     = flow["fwd"], flow["rev"]
     duration     = max(flow["last"] - flow["start"], 0.001)
     spkts        = len(fwd)
@@ -336,8 +423,8 @@ def extract_features(key, flow) -> dict:
     dttl_snapped = _snap_ttl(get_ttl(rev), _KNOWN_DTTL)
     state        = compute_tcp_state(flow)
 
-    service_key   = (dst_ip, TARGET_PORT)
-    state_ttl_key = (dst_ip, state, sttl_snapped)
+    service_key      = (dst_ip, TARGET_PORT)
+    state_ttl_key    = (dst_ip, state, sttl_snapped)
     ct_dst_sport_ltm = count_recent(
         recent_dst_flows, (dst_ip, TARGET_PORT), now, "ct_dst_sport_ltm"
     )
@@ -394,7 +481,13 @@ def extract_features(key, flow) -> dict:
         "ct_ftp_cmd":      0,
         "is_sm_ips_ports": 0,
 
-        "srcip": src_ip,
+        # srcip  = raw packet IP (used by ML model and counter tracking)
+        #          stays as 127.0.0.1 for Cloudflare tunnel traffic
+        # real_ip = best available display IP: CF-Connecting-IP when hint
+        #           resolved, else falls back to raw packet srcip
+        #           backend prefers real_ip for source_ip stored in Redis
+        "srcip":   src_ip,
+        "real_ip": reported_src_ip,
     }
 
     remember(recent_dst_flows, dst_ip, now)
@@ -412,16 +505,15 @@ def extract_features(key, flow) -> dict:
 # FLUSH
 # ─────────────────────────────────────────────────────────────────────────────
 
-# check which flow is ready to send
 def flush_flows(now: float):
     remove = []
-    for key, flow in active_flows.items(): # key: -  (src_ip, dst_ip, src_port, dst_port, proto)
+    for key, flow in active_flows.items():
         total = len(flow["fwd"]) + len(flow["rev"])
         idle  = (time.time() - flow["last"]) > FLOW_TIMEOUT
         big   = total >= MAX_FLOW_PKTS
         if (idle or big) and total >= 1:
-            data = extract_features(key, flow) # extract ml feature from flow
-            send_to_backend(data) # send to node js backend
+            data = extract_features(key, flow)
+            send_to_backend(data)
             remove.append(key)
     for k in remove:
         del active_flows[k]
@@ -458,9 +550,9 @@ def main():
     print(f"[Agent] WiFi/LAN : {LAN_IFACE or 'NOT FOUND'}")
     print(f"[Agent] Port     : {TARGET_PORT}")
     print(f"[Agent] Backend  : {BACKEND_URL}")
+    print(f"[Agent] Hint srv : 127.0.0.1:{HINT_PORT}/ip-hint")
     print("=" * 60)
 
-    # ── Self-test before starting capture threads ──────────────────────────
     if not run_selftests():
         print("\n[Agent] FATAL: Cannot sniff — check Npcap and run as Administrator")
         print("[Agent] HOW TO FIX: Close this window, search PowerShell,")
@@ -469,7 +561,11 @@ def main():
 
     threads = []
 
-    # ── Always sniff loopback (self-traffic on Windows goes here) ──────────
+    # ── Hint HTTP server — receives real IPs from the test server ─────────
+    t_hint = threading.Thread(target=run_hint_server, daemon=True, name="hint-server")
+    threads.append(t_hint)
+
+    # ── Always sniff loopback (Cloudflare tunnel + self-traffic on Windows)
     t_lo = threading.Thread(
         target=capture_on,
         args=(LOOPBACK_IFACE, "LO"),
@@ -478,7 +574,7 @@ def main():
     )
     threads.append(t_lo)
 
-    # ── Also sniff WiFi/LAN if available (remote device traffic) ──────────
+    # ── Also sniff WiFi/LAN if available (same-network direct traffic) ────
     if LAN_IFACE:
         t_lan = threading.Thread(
             target=capture_on,
@@ -490,7 +586,7 @@ def main():
     else:
         print("[Agent] WARNING: No LAN interface — remote-device traffic won't be captured")
 
-    # ── Flow processor ─────────────────────────────────────────────────────
+    # ── Flow processor ────────────────────────────────────────────────────
     t_proc = threading.Thread(target=process_packets, daemon=True, name="processor")
     threads.append(t_proc)
 
@@ -498,7 +594,7 @@ def main():
         t.start()
 
     print(f"\n[Agent] {len(threads)} threads running. Send traffic to port {TARGET_PORT}.")
-    print("[Agent] You should see [Flow] lines appear within a second of each request.\n")
+    print("[Agent] Loopback flows will have their srcip substituted from hint cache.\n")
 
     try:
         while True:
