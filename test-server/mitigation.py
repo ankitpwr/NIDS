@@ -18,6 +18,7 @@ Install dependency:
 import time
 import redis as redis_lib
 from flask import request, jsonify
+from flask import make_response
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -205,8 +206,36 @@ def mitigation_before_request():
     result = check(ip)
     if result:
         status_code, body = result
-        resp = jsonify(body)
-        resp.status_code = status_code
+        
+        # ── NEW: Serve visual HTML block page to browsers, JSON to APIs ──
+        if "text/html" in request.headers.get("Accept", ""):
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Access Denied - NIDS</title>
+                <style>
+                    body {{ background-color: #1a1a1a; color: white; font-family: monospace; text-align: center; padding-top: 100px; }}
+                    .alert {{ color: #ff4c4c; font-size: 48px; margin-bottom: 10px; }}
+                    .details {{ background: #333; padding: 20px; display: inline-block; border-left: 5px solid #ff4c4c; text-align: left; margin-top: 20px; }}
+                </style>
+            </head>
+            <body>
+                <div class="alert">⚠️ ACCESS BLOCKED</div>
+                <p>The Network Intrusion Detection System (NIDS) has intercepted and blocked this request.</p>
+                <div class="details">
+                    <p><strong>Your IP:</strong> {ip}</p>
+                    <p><strong>Status Code:</strong> HTTP {status_code}</p>
+                    <p><strong>Reason:</strong> {body.get('reason') or body.get('error')}</p>
+                </div>
+            </body>
+            </html>
+            """
+            resp = make_response(html, status_code)
+        else:
+            resp = jsonify(body)
+            resp.status_code = status_code
+
         resp.headers["X-RateLimit-Limit"]  = str(MAX_REQUESTS)
         resp.headers["X-RateLimit-Window"] = str(WINDOW_MS // 1000)
         resp.headers["Retry-After"]        = str(WINDOW_MS // 1000)
